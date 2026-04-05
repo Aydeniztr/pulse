@@ -229,7 +229,7 @@ int main() {
         // Individual CPU Cores - Scalable layout
         int cores_to_draw = n_cpu;
         if (cores_to_draw > rows - 6) cores_to_draw = rows - 6;
-        
+         
         int cpu_bar_width = cols - 15;
         for (int i = 0; i < cores_to_draw; i++) {
             unsigned long long dt = get_total_time(&curr_cpu[i]) - get_total_time(&prev_cpu[i]);
