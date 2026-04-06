@@ -1,3 +1,5 @@
+<img src="terminal.png">
+
 # cmon 📊
 
 > A lightweight, dynamic terminal system monitor written in C.
