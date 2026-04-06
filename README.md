@@ -1,10 +1,8 @@
-<img src="terminal.png">
-
 # cmon 📊
 
 > A lightweight, dynamic terminal system monitor written in C.
 
-![cmon Demo](demo.gif) *(Add an animated GIF of cmon in action here!)*
+![cmon Demo](terminal.png)
 
 `cmon` (C-Monitor) is a fast, low-footprint system monitor that gives you a real-time, responsive overview of your machine's vital statistics straight from the terminal.
 
