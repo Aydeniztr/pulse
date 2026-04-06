@@ -178,7 +178,7 @@ void draw_bar(int y, int x, int width, float percentage, const char *extra, int 
     mvaddch(y, x, '[');
     int c = (percentage > 85.0f) ? 3 : color;
     attron(COLOR_PAIR(c));
-    for (int i = 0; i < filled; i++) mvaddstr(y, x + 1 + i, "#");
+    for (int i = 0; i < filled; i++) mvaddstr(y, x + 1 + i, "█");
     attroff(COLOR_PAIR(c));
     for (int i = filled; i < width - 2; i++) mvaddch(y, x + 1 + i, ' ');
     mvaddch(y, x + width - 1, ']');
