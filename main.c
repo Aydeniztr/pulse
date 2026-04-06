@@ -53,8 +53,14 @@ typedef struct {
 } Disk_Stats;
 
 typedef struct {
-    int capacity; 
-    float power_w;
+    int has_battery;
+    int capacity;          // Percentage (0-100)
+    float bat_power_w;     // Battery power draw/charge in Watts
+    char bat_status[16];   // "Charging", "Discharging", "Full", etc.
+
+    int has_rapl;
+    unsigned long long last_energy_uj; // Previous RAPL energy reading
+    float cpu_power_w;                 // Calculated CPU power in Watts
 } Power_Stats;
 
 typedef struct {
@@ -71,6 +77,8 @@ typedef struct {
 // Global state for hardware discovery and sorting
 char primary_net[32] = {0};
 char primary_disk[32] = {0};
+char bat_path[512] = {0};
+char rapl_path[256] = {0};
 char current_sort = 'c';
 
 unsigned long long get_total_time(CPU_Stats *s) {
@@ -138,6 +146,36 @@ void discover_hardware() {
         strncpy(primary_disk, best_disk, 31);
         fclose(fp);
     }
+
+    // Discover RAPL
+    fp = fopen("/sys/class/powercap/intel-rapl:0/energy_uj", "r");
+    if (fp) {
+        strncpy(rapl_path, "/sys/class/powercap/intel-rapl:0/energy_uj", 255);
+        fclose(fp);
+    }
+    
+    // Discover Battery
+    DIR *dir = opendir("/sys/class/power_supply");
+    if (dir) {
+        struct dirent *ent;
+        while ((ent = readdir(dir)) != NULL) {
+            if (strncmp(ent->d_name, "BAT", 3) == 0 || strncmp(ent->d_name, "macsmc-battery", 14) == 0) {
+                char type_path[512];
+                snprintf(type_path, sizeof(type_path), "/sys/class/power_supply/%s/type", ent->d_name);
+                FILE *tfp = fopen(type_path, "r");
+                if (tfp) {
+                    char type[32];
+                    if (fgets(type, sizeof(type), tfp) && strncmp(type, "Battery", 7) == 0) {
+                        snprintf(bat_path, sizeof(bat_path), "/sys/class/power_supply/%s", ent->d_name);
+                        fclose(tfp);
+                        break;
+                    }
+                    fclose(tfp);
+                }
+            }
+        }
+        closedir(dir);
+    }
 }
 
 int read_load_avg(Load_Avg *load) {
@@ -193,6 +231,72 @@ int read_disk_stats(Disk_Stats *disk) {
     }
     fclose(fp);
     return 0;
+}
+
+void read_battery(Power_Stats *p) {
+    if (!bat_path[0]) {
+        p->has_battery = 0;
+        return;
+    }
+    p->has_battery = 1;
+    char path[512];
+    FILE *fp;
+
+    // Capacity
+    snprintf(path, sizeof(path), "%s/capacity", bat_path);
+    fp = fopen(path, "r");
+    if (fp) { if (fscanf(fp, "%d", &p->capacity) != 1) { p->capacity = 0; } fclose(fp); }
+
+    // Status
+    snprintf(path, sizeof(path), "%s/status", bat_path);
+    fp = fopen(path, "r");
+    if (fp) { if (fscanf(fp, "%15s", p->bat_status) != 1) { p->bat_status[0] = '\0'; } fclose(fp); }
+    
+    // Power Draw
+    snprintf(path, sizeof(path), "%s/power_now", bat_path);
+    fp = fopen(path, "r");
+    if (fp) {
+        long long power_uw = 0;
+        if (fscanf(fp, "%lld", &power_uw) == 1) {
+            p->bat_power_w = power_uw / 1000000.0f;
+        } else {
+            p->bat_power_w = 0.0f;
+        }
+        fclose(fp);
+    } else {
+        long long current_ua = 0, voltage_uv = 0;
+        snprintf(path, sizeof(path), "%s/current_now", bat_path);
+        FILE *cfp = fopen(path, "r");
+        if (cfp) { if (fscanf(cfp, "%lld", &current_ua) != 1) { current_ua = 0; } fclose(cfp); }
+        
+        snprintf(path, sizeof(path), "%s/voltage_now", bat_path);
+        FILE *vfp = fopen(path, "r");
+        if (vfp) { if (fscanf(vfp, "%lld", &voltage_uv) != 1) { voltage_uv = 0; } fclose(vfp); }
+        
+        p->bat_power_w = (current_ua / 1000000.0f) * (voltage_uv / 1000000.0f);
+    }
+}
+
+void read_cpu_power(Power_Stats *p, long elapsed_ms) {
+    if (!rapl_path[0]) {
+        p->has_rapl = 0;
+        return;
+    }
+    p->has_rapl = 1;
+    FILE *fp = fopen(rapl_path, "r");
+    if (!fp) return;
+    
+    unsigned long long energy_uj = 0;
+    if (fscanf(fp, "%llu", &energy_uj) == 1) {
+        if (p->last_energy_uj > 0 && energy_uj >= p->last_energy_uj && elapsed_ms > 0) {
+            unsigned long long diff = energy_uj - p->last_energy_uj;
+            p->cpu_power_w = ((float)diff / 1000000.0f) / (elapsed_ms / 1000.0f);
+        } else {
+            p->cpu_power_w = 0.0f;
+        }
+        p->last_energy_uj = energy_uj;
+    }
+    fclose(fp);
 }
 
 void format_bytes(unsigned long long bytes, char *buf) {
@@ -396,6 +500,7 @@ int main() {
     
     int first_render = 1;
     Load_Avg load = {0};
+    Power_Stats p_stats = {0};
     Memory_Stats mem = init_mem;
     char rx_s[16] = "0 B/s", tx_s[16] = "0 B/s", r_s[16] = "0 B/s", w_s[16] = "0 B/s";
 
@@ -451,6 +556,9 @@ int main() {
             format_bytes((unsigned long long)((curr_disk.read_sectors - prev_disk.read_sectors) * 512 * time_factor), r_s);
             format_bytes((unsigned long long)((curr_disk.write_sectors - prev_disk.write_sectors) * 512 * time_factor), w_s);
             
+            read_battery(&p_stats);
+            read_cpu_power(&p_stats, elapsed_ms > 0 ? elapsed_ms : 500);
+
             updated_data = 1;
         } else if (input_handled) {
             qsort(curr_procs, n_procs, sizeof(Process_Info), compare_processes);
@@ -462,7 +570,20 @@ int main() {
         erase();
         
         attron(A_BOLD | COLOR_PAIR(4)); mvprintw(0, 0, "CPUVIEW DYNAMIC"); attroff(A_BOLD | COLOR_PAIR(4));
-        mvprintw(0, cols - 20, "Load: %.2f %.2f %.2f", load.load1, load.load5, load.load15);
+        
+        char header_info[128];
+        int header_len = snprintf(header_info, sizeof(header_info), "Load: %.2f %.2f %.2f", load.load1, load.load5, load.load15);
+        if (p_stats.has_rapl) {
+            header_len += snprintf(header_info + header_len, sizeof(header_info) - header_len, " | CPU: %.1fW", p_stats.cpu_power_w);
+        }
+        if (p_stats.has_battery) {
+            if (strncmp(p_stats.bat_status, "Charging", 8) == 0 || strncmp(p_stats.bat_status, "Full", 4) == 0) {
+                header_len += snprintf(header_info + header_len, sizeof(header_info) - header_len, " | BAT: %d%% (AC)", p_stats.capacity);
+            } else {
+                header_len += snprintf(header_info + header_len, sizeof(header_info) - header_len, " | BAT: %d%% (-%.1fW)", p_stats.capacity, p_stats.bat_power_w);
+            }
+        }
+        mvprintw(0, cols - header_len, "%s", header_info);
 
         // Responsive Memory Bar
         int dyn_bar = cols / 2; if (dyn_bar < MIN_BAR_WIDTH) dyn_bar = MIN_BAR_WIDTH;
